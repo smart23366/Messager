@@ -1,0 +1,1736 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MESSAGE AQUARIUM</title>
+<!--
+================================================================================
+  MESSAGE AQUARIUM — LOCAL DISPLAY
+  Architecture v3 / Phase 2
+--------------------------------------------------------------------------------
+  เปิดด้วยการดับเบิลคลิกบน Mac (file://) — ไม่ต้องมี server, Node, npm, framework
+  Vanilla HTML + CSS + JS (classic script, ไม่มี ES module เพราะ file:// บล็อก)
+
+  READ ONLY — ไฟล์นี้ไม่มี write path กลับ Google Sheets ใด ๆ ทั้งสิ้น
+
+  ต้องมีไฟล์ประกอบในโฟลเดอร์เดียวกัน:
+      ./assets/background.mp4
+      ./assets/qr.png
+
+  URL parameters:
+      ?fresh=1    เริ่มจอว่างจริง (ใช้ตอนเปิดงาน)
+      (ไม่ใส่)     ดึงข้อความที่ยังไม่หมด TTL กลับมา (ใช้ตอน restart กลางงาน)
+      ?api=<url>  override API URL ชั่วคราวสำหรับทดสอบ
+      ?diag=1     เปิดแผง diagnostics ตั้งแต่เริ่ม
+      ?blur=1     เปิด runtime blur ของวิดีโอ (ใช้เมื่อ background.mp4 ยังไม่ได้ bake blur)
+
+  Keyboard:
+      F  fullscreen      R  reload
+      C  จมข้อความทั้งจอ   D  diagnostics
+================================================================================
+-->
+<style>
+/* ==========================================================================
+   00 · RESET
+   ========================================================================== */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#000; }
+body {
+  cursor:none;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  font-family:"Anuphan","IBM Plex Sans Thai","Noto Sans Thai","Sukhumvit Set",
+              "Thonburi","Helvetica Neue",-apple-system,BlinkMacSystemFont,sans-serif;
+  -webkit-user-select:none; user-select:none;
+}
+
+/* ==========================================================================
+   10 · STAGE  (perspective root)
+   --------------------------------------------------------------------------
+   กฎเหล็ก: ห้ามใส่ filter / opacity<1 / contain:paint ที่ #stage หรือ #aquarium
+            เพราะจะสร้าง flattening ทำให้ preserve-3d ตายและข้อความกลายเป็น 2D
+   ========================================================================== */
+#stage {
+  position:fixed; top:0; left:0; right:0; bottom:0;
+  overflow:hidden; background:#02050a;
+  perspective:1400px;
+  perspective-origin:50% 42%;
+}
+
+/* ---- LAYER 1 : BACKGROUND VIDEO (subtree แยกขาดจากข้อความ) ---- */
+#bg-layer {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  z-index:1; overflow:hidden; background:#02050a;
+  transform:translateZ(0);            /* บังคับเป็น composited layer ของตัวเอง */
+}
+#bg-layer video {
+  position:absolute; top:50%; left:50%;
+  width:100%; height:100%;
+  object-fit:cover;                   /* รักษา aspect ratio 16:9 — ไม่ stretch */
+  transform:translate(-50%,-50%) scale(1.06) translateZ(0);
+  will-change:transform;
+  pointer-events:none;
+}
+#bgB { opacity:0; }
+
+/* fallback เมื่อวิดีโอโหลดไม่ได้ — จอต้องไม่มีวันดำสนิท */
+body.no-video #bg-layer video { display:none; }
+body.no-video #bg-layer {
+  background:
+    radial-gradient(120% 90% at 30% 28%, #0d2a3a 0%, #071620 45%, #03080e 100%);
+  animation:bgDrift 52s ease-in-out infinite alternate;
+}
+@keyframes bgDrift {
+  0%   { background-position:0% 0%;   filter:hue-rotate(0deg); }
+  100% { background-position:100% 100%; filter:hue-rotate(-14deg); }
+}
+
+/* ---- LAYER 2 : DARKENING (overlay opacity — ไม่ใช้ filter:brightness) ---- */
+#bg-darken {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  z-index:2; pointer-events:none;
+  background:
+    radial-gradient(118% 88% at 50% 38%,
+      rgba(0,0,0,.14) 0%, rgba(0,0,0,.58) 66%, rgba(0,0,0,.80) 100%),
+    linear-gradient(180deg,
+      rgba(2,7,13,.58) 0%, rgba(2,7,13,.30) 42%, rgba(2,7,13,.72) 100%);
+}
+
+/* ---- LAYER 3 : CINEMATIC OVERLAY ---- */
+#cinematic-overlay {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  z-index:3; pointer-events:none; overflow:hidden;
+  background:linear-gradient(180deg,
+    rgba(16,54,74,.20) 0%, rgba(0,0,0,0) 46%, rgba(34,20,6,.12) 100%);
+}
+.shaft {
+  position:absolute; top:-32%; height:164%; width:24vw;
+  background:linear-gradient(90deg,
+    rgba(158,226,244,0) 0%, rgba(158,226,244,.055) 50%, rgba(158,226,244,0) 100%);
+  filter:blur(22px);
+  will-change:transform;
+}
+.shaft.s1 { left:6%;  animation:shaftA 74s ease-in-out infinite; }
+.shaft.s2 { left:42%; animation:shaftB 96s ease-in-out infinite; }
+.shaft.s3 { left:72%; animation:shaftA 86s ease-in-out infinite reverse; }
+@keyframes shaftA {
+  0%,100% { transform:rotate(10deg) translate3d(-60px,0,0); opacity:.55; }
+  50%     { transform:rotate(13deg) translate3d(90px,0,0);  opacity:1; }
+}
+@keyframes shaftB {
+  0%,100% { transform:rotate(-8deg) translate3d(70px,0,0);  opacity:.9; }
+  50%     { transform:rotate(-11deg) translate3d(-80px,0,0); opacity:.45; }
+}
+body.q-noshafts .shaft { display:none; }
+
+/* ---- LAYER 4 : VIGNETTE ---- */
+#vignette {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  z-index:4; pointer-events:none;
+  background:radial-gradient(ellipse 72% 64% at 50% 43%,
+    rgba(0,0,0,0) 38%, rgba(0,0,0,.50) 76%, rgba(0,0,0,.88) 100%);
+}
+
+/* ---- LAYER 5 : AQUARIUM (3D floating text) ---- */
+#aquarium {
+  position:absolute; top:0; left:0; right:0; bottom:150px;
+  z-index:5; pointer-events:none;
+  transform-style:preserve-3d;
+  will-change:transform;
+  /* ★ ไม่มี filter ★ ไม่มี opacity ★ ไม่มี contain:paint ★ */
+}
+
+.msg {
+  position:absolute; top:0; left:0;
+  max-width:520px;
+  text-align:center; line-height:1.42;
+  word-break:break-word; overflow-wrap:break-word;
+  color:#FFFFFF;
+  opacity:0; visibility:hidden;
+  transform:translate3d(0,0,0);
+  transform-origin:50% 50%;
+  backface-visibility:hidden; -webkit-backface-visibility:hidden;
+  contain:layout style;
+  font-synthesis:none;
+  pointer-events:none;
+  text-shadow:0 0 32px rgba(3,10,18,.62), 0 0 12px rgba(3,10,18,.45), 0 1px 3px rgba(0,0,0,.55);
+}
+.msg.on { visibility:visible; }
+
+/* halo เฉพาะที่ — สร้าง contrast ให้ข้อความโดยไม่ทำให้ทั้งจอมืดลง */
+.msg::before {
+  content:''; position:absolute;
+  left:-12%; right:-12%; top:-30%; bottom:-30%;
+  background:radial-gradient(ellipse at center,
+    rgba(2,9,16,.52) 0%, rgba(2,9,16,.22) 45%, rgba(2,9,16,0) 72%);
+  z-index:-1; pointer-events:none;
+}
+
+/* PROJECTOR MODE: ทุกข้อความคมชัด ไม่มี depth blur */
+.msg.t0,
+.msg.t1,
+.msg.t2,
+.msg.t3,
+.msg.t4,
+.msg.sinking { filter:none !important; }
+
+/* ripple ring (entrance: ripple-emerge) */
+.msg .ring {
+  position:absolute; left:50%; top:50%;
+  width:120%; padding-bottom:120%;
+  margin-left:-60%; margin-top:-60%;
+  border:1px solid rgba(160,225,240,.42);
+  border-radius:50%;
+  opacity:0; pointer-events:none;
+  transform:scale(.3);
+}
+.msg.rippling .ring { animation:ringOut 2.6s cubic-bezier(.22,1,.36,1) forwards; }
+@keyframes ringOut {
+  0%   { opacity:.75; transform:scale(.28); }
+  100% { opacity:0;   transform:scale(1.05); }
+}
+
+/* letter cascade — แบ่งตาม grapheme cluster เพื่อไม่ให้สระ/วรรณยุกต์ไทยหลุด */
+.msg .txt span {
+  display:inline-block; opacity:0;
+  transform:translateY(12px);
+  animation:charIn .66s cubic-bezier(.22,1,.36,1) forwards;
+}
+@keyframes charIn {
+  to { opacity:1; transform:translateY(0); }
+}
+
+/* ---- TEST special: น่ารักขึ้นเล็กน้อยตอนเข้า ---- */
+.msg.test-special {
+  text-shadow:
+    0 0 34px rgba(210,245,255,.28),
+    0 0 14px rgba(210,245,255,.20),
+    0 2px 4px rgba(0,0,0,.52);
+}
+.msg.test-special::after {
+  content:'✦';
+  position:absolute; right:-.34em; top:-.30em;
+  font-size:.34em; line-height:1;
+  color:rgba(235,251,255,.92);
+  opacity:0; pointer-events:none;
+  text-shadow:0 0 12px rgba(210,245,255,.9);
+  animation:testTwinkle 1.8s ease-in-out infinite;
+}
+@keyframes testTwinkle {
+  0%,100% { opacity:0; transform:scale(.55) rotate(-15deg) translateY(2px); }
+  22%     { opacity:.9; transform:scale(1) rotate(8deg) translateY(0); }
+  48%     { opacity:.35; transform:scale(.78) rotate(0deg) translateY(-1px); }
+  72%     { opacity:.7; transform:scale(.92) rotate(12deg) translateY(0); }
+}
+
+/* ---- LAYER 6 : FILM GRAIN (opacity อย่างเดียว ห้าม mix-blend-mode) ---- */
+#grain {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  z-index:6; pointer-events:none;
+  opacity:.035; background-repeat:repeat;
+}
+body.q-lowgrain #grain { opacity:.016; }
+
+/* ---- LAYER 7 : QR GLOW ---- */
+#qrglow {
+  position:absolute; right:0; bottom:0; width:min(420px,42vw); height:min(420px,42vw);
+  z-index:7; pointer-events:none;
+  background:radial-gradient(ellipse at 72% 74%,
+    rgba(255,255,255,.18) 0%, rgba(255,255,255,.07) 34%, rgba(255,255,255,0) 72%);
+}
+
+/* ---- LAYER 8 : QR FLOAT (นอก #aquarium, ตรึงมุมขวาล่าง) ---- */
+#qrbar {
+  position:absolute; right:clamp(18px,2.2vw,38px); bottom:clamp(18px,2.2vw,38px);
+  width:clamp(210px,22vw,300px); height:clamp(210px,22vw,300px);
+  z-index:8; background:transparent;
+  display:flex; align-items:center; justify-content:center;
+  pointer-events:none;
+}
+
+#qrwrap {
+  position:relative; width:100%; height:100%;
+  display:flex; align-items:center; justify-content:center;
+  padding:16px;
+  background:#fff;
+  border:2px solid rgba(255,255,255,.98);
+  border-radius:18px;
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,.30),
+    0 16px 44px rgba(0,0,0,.48),
+    0 0 46px rgba(255,255,255,.18);
+}
+
+/* QR เท่านั้น — ไม่แสดงชื่อแบรนด์/คำอธิบาย/สถานะ */
+#brand,
+#qrtext,
+#dot {
+  display:none !important;
+}
+
+#qrwrap img {
+  width:100%; height:100%; display:block;
+  object-fit:contain;
+  image-rendering:-webkit-optimize-contrast;
+  image-rendering:crisp-edges;
+}
+
+#qrwrap.noqr img { display:none; }
+
+/* ---- OVERLAY : autoplay unlock ---- */
+#tapstart {
+  position:fixed; top:0; left:0; right:0; bottom:0; z-index:30;
+  background:#03070c; display:none;
+  align-items:center; justify-content:center; flex-direction:column;
+  cursor:pointer; color:#6d808d;
+  font-size:12px; letter-spacing:.32em;
+}
+#tapstart.show { display:flex; pointer-events:auto; }
+#tapstart { pointer-events:none; touch-action:manipulation; }
+#tapstart .k { font-size:15px; letter-spacing:.38em; color:#cfe2ea; margin-bottom:18px; }
+
+/* ---- DIAGNOSTICS ---- */
+#diag {
+  position:fixed; left:14px; top:14px; z-index:40; display:none;
+  font:11px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:#9fd8e4; background:rgba(2,8,14,.8);
+  border:1px solid rgba(120,200,220,.24); border-radius:8px;
+  padding:11px 14px; white-space:pre; pointer-events:none;
+}
+#diag.show { display:block; }
+
+@media (prefers-reduced-motion:reduce) {
+  .shaft { animation:none; }
+}
+</style>
+</head>
+<body>
+
+<div id="stage">
+
+  <div id="bg-layer">
+    <video id="bgA" muted playsinline webkit-playsinline preload="auto"
+           disablepictureinpicture disableremoteplayback
+           src="./assets/background.mp4"></video>
+    <video id="bgB" muted playsinline webkit-playsinline preload="auto"
+           disablepictureinpicture disableremoteplayback
+           src="./assets/background.mp4"></video>
+  </div>
+
+  <div id="bg-darken"></div>
+
+  <div id="cinematic-overlay">
+    <div class="shaft s1"></div>
+    <div class="shaft s2"></div>
+    <div class="shaft s3"></div>
+  </div>
+
+  <div id="vignette"></div>
+
+  <div id="aquarium"></div>
+
+  <div id="grain"></div>
+  <div id="qrglow"></div>
+
+  <div id="qrbar">
+    <div id="brand">
+      <div class="n">MESSAGE AQUARIUM</div>
+      <div class="s">INTERACTIVE INSTALLATION</div>
+    </div>
+    <div id="qrwrap">
+      <img id="qrimg" src="./assets/qr.png" alt="">
+      <div id="qrtext">
+        <div class="a">สแกนเพื่อส่งข้อความของคุณ</div>
+        <div class="b">ข้อความของคุณจะลอยอยู่บนจอนี้ประมาณ 5 นาที</div>
+      </div>
+    </div>
+    <div id="dot"></div>
+  </div>
+
+</div>
+
+<div id="tapstart">
+  <div class="k">MESSAGE AQUARIUM</div>
+  <div>คลิกที่ใดก็ได้เพื่อเริ่ม</div>
+</div>
+
+<pre id="diag"></pre>
+
+<script>
+(function () {
+'use strict';
+
+/* ==========================================================================
+   01 · CONFIG
+   ========================================================================== */
+
+var CONFIG = {
+
+  /* ★★★ แก้บรรทัดนี้เป็น /exec URL ของคุณ ★★★ */
+  API_URL: 'https://script.google.com/macros/s/AKfycbzwFIMHEgyCdpmxnJVvlTQnvw0G8y79Vwl9YATytLvbVyihRjwAKTM86dnR-S1V-iBt/exec',
+
+  /* --- network --- */
+  pollMs:         1800,
+  jitterMs:       250,
+  timeoutMs:      5000,
+  degradedPollMs: 3000,
+  backoffMs:      [4000, 8000, 15000],
+  recoveryResetMs: 300000,      /* ขาดการเชื่อมต่อนานกว่านี้ → ขอ since=0 ใหม่ */
+
+  /* --- lifecycle (ms) --- */
+  ttlMs:      300000,
+  fadeMs:     30000,
+  sinkMs:     [6000, 9000],
+  emergeMs:   [1800, 3000],
+
+  /* --- capacity --- */
+  maxOnScreen: 60,
+  poolSize:    72,
+
+  /* --- spawner --- */
+  spawnGapMs:     [400, 900],
+  spawnGapRush:   [150, 280],   /* เมื่อมี backlog มาก เช่น ตอน recovery */
+  rushThreshold:  12,
+
+  /* --- layout --- */
+  perspective:  1400,
+  originY:      0.42,
+  qrBarH:       150,
+  safeMargin:   80,
+  bottomGap:    40,
+  maxTextWidth: 520,
+  placementTries: 16,
+  qrMargin:     28,
+
+  /* --- motion (หน่วยเป็น px บนจอ) --- */
+  drift:      { x: 22, y: 15, rise: 3.2 },   /* rise = px ต่อวินาที (ลอยขึ้นช้ามาก) */
+  breathe:    0.014,
+  camera:     { x: 12, y: 8, rotY: 0.5, periodS: 46 },
+
+  /* --- background video --- */
+  bg: {
+    filter:     'none',
+    crossfade:  true,
+    leadS:      0.7,
+    watchdogMs: 5000
+  },
+
+  /* --- adaptive quality --- */
+  quality: { windowMs: 5000, down: 52, up: 58 }
+};
+
+/* --- URL parameters --- */
+var Q = (function () {
+  var o = {}, s = String(location.search || '').replace(/^\?/, '');
+  if (!s) return o;
+  s.split('&').forEach(function (kv) {
+    if (!kv) return;
+    var i = kv.indexOf('=');
+    var k = i < 0 ? kv : kv.slice(0, i);
+    var v = i < 0 ? '' : kv.slice(i + 1);
+    try { o[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, ' ')); }
+    catch (e) { o[k] = v; }
+  });
+  return o;
+})();
+
+if (Q.api) CONFIG.API_URL = Q.api;
+if (Q.blur === '1') CONFIG.bg.filter = 'blur(10px) saturate(0.82) contrast(0.94)';
+var FRESH_MODE = (Q.fresh === '1');
+
+/* --- depth tiers --- */
+var TIERS = [
+  { cls:'t0', z:-900, op:1.00, fs:[46,56], weight:22, inset:0.00 },
+  { cls:'t1', z:-520, op:1.00, fs:[44,54], weight:24, inset:0.02 },
+  { cls:'t2', z:-220, op:1.00, fs:[44,56], weight:22, inset:0.04 },
+  { cls:'t3', z: -40, op:1.00, fs:[46,58], weight:22, inset:0.06 },
+  { cls:'t4', z: 110, op:1.00, fs:[48,62], weight:10, inset:0.12 }
+];
+var TIER_COLLAPSED = [1, 2, 3];   /* ใช้เมื่อ adaptive quality ถึงขั้นสุดท้าย */
+
+var PALETTE = [
+  { c:'#FFFFFF', w:100 }
+];
+var WEIGHTS = [500, 500, 600, 600];
+
+var FONT_POOL = ['Anuphan','IBM Plex Sans Thai','Noto Sans Thai',
+                 'Kanit','Prompt','Sarabun','Sukhumvit Set','Thonburi'];
+var FONT_FALLBACK = '"Sukhumvit Set","Thonburi","Helvetica Neue",' +
+                    '-apple-system,BlinkMacSystemFont,sans-serif';
+
+var ENTRANCES = [
+  { name:'rise',    w:20 },
+  { name:'bloom',   w:18 },
+  { name:'side',    w:15 },
+  { name:'ripple',  w:12 },
+  { name:'pop',     w:12 },
+  { name:'bounce',  w:9 },
+  { name:'floaty',  w:6 },
+  { name:'swirl',   w:5 },
+  { name:'peek',    w:3 },
+  { name:'cascade', w:6, heroOnly:true }
+];
+
+/* TEST โดยเฉพาะ: หมุนเลือก motion ที่ดูน่ารักและไม่ซ้ำอารมณ์กัน */
+var TEST_ENTRANCES = [
+  { name:'pop',    w:26 },
+  { name:'bounce', w:24 },
+  { name:'swirl',  w:20 },
+  { name:'floaty', w:18 },
+  { name:'peek',   w:12 }
+];
+
+
+/* ==========================================================================
+   02 · UTIL
+   ========================================================================== */
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function r1(v) { return Math.round(v * 10) / 10; }
+function easeOutQuint(u) { var k = 1 - u; return 1 - k * k * k * k * k; }
+function easeOutCubic(u) { var k = 1 - u; return 1 - k * k * k; }
+function easeInCubic(u) { return u * u * u; }
+function easeOutBack(u) { var c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(u - 1, 3) + c1 * Math.pow(u - 1, 2); }
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function hashStr(s) {
+  var h = 2166136261;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/* ตารางค่า noise ร่วมกันทั้งแอป — แต่ละโหนดใช้ offset/ความถี่ของตัวเอง
+   จึงไม่มีทางขยับพร้อมกัน และไม่ต้องจองหน่วยความจำต่อโหนด */
+var NOISE_N = 512;
+var NOISE = (function () {
+  var r = mulberry32(0x5EED1A), t = new Float32Array(NOISE_N);
+  for (var i = 0; i < NOISE_N; i++) t[i] = r() * 2 - 1;
+  return t;
+})();
+
+function noise1(x) {
+  var xi = Math.floor(x), f = x - xi;
+  var i0 = ((xi % NOISE_N) + NOISE_N) % NOISE_N;
+  var i1 = (i0 + 1) % NOISE_N;
+  var u = f * f * (3 - 2 * f);
+  return NOISE[i0] * (1 - u) + NOISE[i1] * u;
+}
+
+function pickWeighted(list, rnd) {
+  var total = 0, i;
+  for (i = 0; i < list.length; i++) total += (list[i].w || list[i].weight || 1);
+  var r = (rnd || Math.random)() * total;
+  for (i = 0; i < list.length; i++) {
+    r -= (list[i].w || list[i].weight || 1);
+    if (r <= 0) return list[i];
+  }
+  return list[list.length - 1];
+}
+
+/* แบ่งข้อความตาม grapheme cluster — จำเป็นมากสำหรับภาษาไทย
+   ไม่งั้นสระ/วรรณยุกต์จะหลุดไปอยู่ span ของตัวเองแล้วกลายเป็น ◌ั */
+function splitGraphemes(str) {
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    try {
+      var seg = new Intl.Segmenter('th', { granularity: 'grapheme' });
+      var out = [], it = seg.segment(str)[Symbol.iterator]();
+      for (var r = it.next(); !r.done; r = it.next()) out.push(r.value.segment);
+      return out;
+    } catch (e) { /* ตกไปใช้วิธีสำรอง */ }
+  }
+  var MARK = /[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E\u0300-\u036F\uFE00-\uFE0F]/;
+  var res = [], arr = Array.from(str);
+  for (var i = 0; i < arr.length; i++) {
+    if (res.length && MARK.test(arr[i])) res[res.length - 1] += arr[i];
+    else res.push(arr[i]);
+  }
+  return res;
+}
+
+
+/* ==========================================================================
+   03 · TRANSPORT — JSONP (ทางเดียวที่ใช้ได้จาก file://)
+   --------------------------------------------------------------------------
+   fetch()/XHR จาก file:// มี origin = "null" → ถูก CORS ปฏิเสธเสมอ
+   <script src> ไม่อยู่ใต้ CORS และเดินตาม 302 redirect ของ Apps Script ได้เอง
+   ========================================================================== */
+
+var Transport = (function () {
+  var seq = 0;
+  var inflight = 0;
+
+  function busy() { return inflight > 0; }
+
+  function get(params, onOk, onErr) {
+    if (inflight > 0) { onErr('inflight'); return; }   /* อนุญาตค้างได้ 1 ตัวเท่านั้น */
+
+    var name = '__aq_cb_' + (++seq);
+    var script = document.createElement('script');
+    var timer = null;
+    var settled = false;
+    var sentAt = Date.now();
+
+    function cleanup() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      try { delete window[name]; } catch (e) { window[name] = undefined; }
+      if (script && script.parentNode) script.parentNode.removeChild(script);
+      script = null;
+      inflight--;
+    }
+
+    window[name] = function (data) {
+      if (settled) return;
+      settled = true;
+      var rtt = Date.now() - sentAt;
+      cleanup();
+      try { onOk(data, sentAt, rtt); }
+      catch (e) { if (window.console) console.log('handler error', e); }
+    };
+
+    script.onerror = function () {
+      if (settled) return;
+      settled = true; cleanup(); onErr('network');
+    };
+
+    timer = setTimeout(function () {
+      if (settled) return;
+      settled = true; cleanup(); onErr('timeout');
+    }, CONFIG.timeoutMs);
+
+    var qs = [];
+    for (var k in params) {
+      if (Object.prototype.hasOwnProperty.call(params, k)) {
+        qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k]));
+      }
+    }
+    qs.push('callback=' + name);
+    qs.push('_=' + Date.now());          /* cache-buster — Safari cache GET */
+
+    inflight++;
+    script.async = true;
+    script.src = CONFIG.API_URL + (CONFIG.API_URL.indexOf('?') < 0 ? '?' : '&') + qs.join('&');
+    (document.head || document.documentElement).appendChild(script);
+  }
+
+  return { get: get, busy: busy };
+})();
+
+
+/* ==========================================================================
+   04 · STORE
+   ========================================================================== */
+
+var Store = {
+  cursor: 0,
+  seen: Object.create(null),
+  seenCount: 0,
+  revoked: Object.create(null),
+  clockOffset: 0,
+  bestRtt: Infinity,
+  bestAt: 0,
+  lastHandledClearAllAt: 0,
+  gotFirstResponse: false,
+  lastSuccessAt: 0,
+
+  now: function () { return Date.now() + this.clockOffset; },
+
+  syncClock: function (serverTimeIso, sentAt, rtt) {
+    var sv = Date.parse(serverTimeIso);
+    if (isNaN(sv)) return;
+    var now = Date.now();
+    /* เลือกตัวอย่างที่ RTT ต่ำสุด และรีเฟรชอย่างน้อยทุก 2 นาที */
+    if (rtt < this.bestRtt || (now - this.bestAt) > 120000) {
+      this.clockOffset = (sv + rtt / 2) - now;
+      this.bestRtt = rtt;
+      this.bestAt = now;
+    }
+  },
+
+  markSeen: function (id) {
+    if (this.seen[id]) return false;
+    this.seen[id] = 1;
+    this.seenCount++;
+    if (this.seenCount > 4000) { this.seen = Object.create(null); this.seenCount = 0; }
+    return true;
+  },
+
+  revoke: function (id) { this.revoked[id] = 1; }
+};
+
+
+/* ==========================================================================
+   05 · TYPOGRAPHY
+   --------------------------------------------------------------------------
+   ตรวจจับฟอนต์ที่ "ติดตั้งจริงบนเครื่อง" ด้วยการวัดความกว้าง
+   ถ้าไม่ตรวจก่อน การสุ่มฟอนต์ที่ไม่มีจะตกไป fallback ทั้งหมดจนหน้าตาเหมือนกันหมด
+   ========================================================================== */
+
+var Typography = (function () {
+  var active = [];
+
+  function detect() {
+    var c = document.createElement('canvas');
+    var ctx = c.getContext('2d');
+    var probe = 'กขคงจฉชญฎไทยMHWimw123';
+    var bases = ['monospace', 'serif', 'sans-serif'];
+    var baseW = {};
+    var i, j;
+
+    for (i = 0; i < bases.length; i++) {
+      ctx.font = '72px ' + bases[i];
+      baseW[bases[i]] = ctx.measureText(probe).width;
+    }
+
+    var found = [];
+    for (i = 0; i < FONT_POOL.length; i++) {
+      var f = FONT_POOL[i], ok = false;
+      for (j = 0; j < bases.length; j++) {
+        ctx.font = '72px "' + f + '",' + bases[j];
+        if (Math.abs(ctx.measureText(probe).width - baseW[bases[j]]) > 0.6) { ok = true; break; }
+      }
+      if (ok) found.push(f);
+    }
+    active = found;
+    return found;
+  }
+
+  function stackFor(name) {
+    if (!name) return FONT_FALLBACK;
+    return '"' + name + '",' + FONT_FALLBACK;
+  }
+
+  /** เลือกฟอนต์แบบคงที่ต่อข้อความหนึ่ง ๆ (seeded) — re-render แล้วไม่เปลี่ยน */
+  function resolve(requested, seed) {
+    if (!active.length) return FONT_FALLBACK;
+    if (requested) {
+      for (var i = 0; i < active.length; i++) {
+        if (active[i] === requested) return stackFor(requested);
+      }
+    }
+    var rnd = mulberry32(seed);
+    return stackFor(active[Math.floor(rnd() * active.length) % active.length]);
+  }
+
+  return {
+    detect: detect,
+    resolve: resolve,
+    activeList: function () { return active; }
+  };
+})();
+
+
+/* ==========================================================================
+   06 · DEPTH
+   --------------------------------------------------------------------------
+   ขนาดบนจอเกิดจาก perspective ไม่ใช่จากการ scale ซ้อน:
+       p = perspective / (perspective - z)
+   ตำแหน่งจึงคำนวณใน "พิกัดจอ" แล้วแปลงกลับเป็นพิกัดเลเยอร์ด้วย p
+   ทำให้ข้อความกระจายเต็มจอได้เท่ากันทุกระดับความลึก
+   ========================================================================== */
+
+var Depth = {
+  collapsed: false,
+
+  pOf: function (z) { return CONFIG.perspective / (CONFIG.perspective - z); },
+
+  pick: function (rnd) {
+    if (this.collapsed) {
+      return TIERS[TIER_COLLAPSED[Math.floor((rnd || Math.random)() * TIER_COLLAPSED.length)]];
+    }
+    return pickWeighted(TIERS, rnd);
+  },
+
+  toLayerX: function (sx, p, ox) { return ox + (sx - ox) / p; },
+  toLayerY: function (sy, p, oy) { return oy + (sy - oy) / p; }
+};
+
+
+/* ==========================================================================
+   07 · MOTION  (analytic — เป็นฟังก์ชันของเวลา จึงไม่มี integration drift
+                 และผลลัพธ์เท่ากันทุก frame rate)
+   ========================================================================== */
+
+var Camera = { x: 0, y: 0, rotY: 0 };
+
+function updateCamera(T) {
+  var c = CONFIG.camera;
+  var w = (Math.PI * 2) / c.periodS;
+  Camera.x    = Math.sin(T * w) * c.x + noise1(T * 0.055) * (c.x * 0.4);
+  Camera.y    = Math.cos(T * w * 0.78) * c.y;
+  Camera.rotY = Math.sin(T * w * 0.63 + 1.1) * c.rotY;
+}
+
+
+/* ==========================================================================
+   08 · MESSAGE NODE + OBJECT POOL
+   --------------------------------------------------------------------------
+   สร้าง DOM ครบทั้งพูลตอน boot แล้วรีไซเคิล
+   ไม่มี create/remove ระหว่างงาน → ไม่มี GC hitch ที่เห็นชัดบนโปรเจกเตอร์
+   ========================================================================== */
+
+var ST = { IDLE:0, EMERGING:1, DRIFTING:2, FADING:3, SINKING:4 };
+
+function Node(el) {
+  this.el   = el;
+  this.txt  = el.firstChild;
+  this.ring = el.lastChild;
+  this.active = false;
+  this.state = ST.IDLE;
+  this.id = '';
+}
+
+Node.prototype.reset = function () {
+  this.active = false;
+  this.state = ST.IDLE;
+  this.id = '';
+  var e = this.el;
+  this.isTest = false;
+  e.className = 'msg';
+  e.style.opacity = '0';
+  e.style.willChange = 'auto';          /* ★ ถอด will-change เมื่อ DEAD */
+  e.style.transform = 'translate3d(0,0,0)';
+  while (this.txt.firstChild) this.txt.removeChild(this.txt.firstChild);
+};
+
+
+var Pool = {
+  nodes: [],
+  free: [],
+
+  init: function (host) {
+    for (var i = 0; i < CONFIG.poolSize; i++) {
+      var el = document.createElement('div');
+      el.className = 'msg';
+      var t = document.createElement('span'); t.className = 'txt';
+      var r = document.createElement('i');    r.className = 'ring';
+      el.appendChild(t); el.appendChild(r);
+      host.appendChild(el);
+      var n = new Node(el);
+      this.nodes.push(n);
+      this.free.push(n);
+    }
+  },
+
+  acquire: function () { return this.free.length ? this.free.pop() : null; },
+
+  release: function (n) { n.reset(); this.free.push(n); },
+
+  activeCount: function () { return this.nodes.length - this.free.length; }
+};
+
+
+/* ==========================================================================
+   09 · SPAWNER
+   ========================================================================== */
+
+var Aquarium = {
+  el: null, w: 0, h: 0, ox: 0, oy: 0, stageH: 0
+};
+
+function measureStage() {
+  var st = document.getElementById('stage');
+  Aquarium.stageH = st.clientHeight;
+  Aquarium.w = Aquarium.el.clientWidth;
+  Aquarium.h = Aquarium.el.clientHeight;
+  Aquarium.ox = Aquarium.w / 2;
+  Aquarium.oy = Aquarium.stageH * CONFIG.originY;
+}
+
+
+var Spawner = {
+  queue: [],
+  nextAt: 0,
+
+  enqueue: function (m) {
+    if (Store.revoked[m.id]) return;
+    this.queue.push(m);
+    this.queue.sort(function (a, b) { return a.seq - b.seq; });
+  },
+
+  dropBefore: function (ts) {
+    this.queue = this.queue.filter(function (m) { return m.ts > ts; });
+  },
+
+  dropId: function (id) {
+    this.queue = this.queue.filter(function (m) { return m.id !== id; });
+  },
+
+  gap: function () {
+    var g = (this.queue.length >= CONFIG.rushThreshold)
+      ? CONFIG.spawnGapRush : CONFIG.spawnGapMs;
+    return (g[0] + Math.random() * (g[1] - g[0])) / 1000;
+  },
+
+  tick: function (T) {
+    if (!this.queue.length) return;
+    if (T < this.nextAt) return;
+
+    var now = Store.now();
+    var m = null;
+
+    /* ทิ้งข้อความที่หมดอายุไปแล้วระหว่างรอคิว */
+    while (this.queue.length) {
+      var cand = this.queue.shift();
+      if (Store.revoked[cand.id]) continue;
+      if ((now - cand.ts) >= CONFIG.ttlMs - 8000) continue;
+      m = cand; break;
+    }
+    if (!m) return;
+
+    if (Pool.activeCount() >= CONFIG.maxOnScreen) forceSinkOldest();
+
+    var n = Pool.acquire();
+    if (!n) { this.queue.unshift(m); this.nextAt = T + 0.35; return; }
+
+    spawnNode(n, m, T);
+    this.nextAt = T + this.gap();
+  }
+};
+
+
+function forceSinkOldest() {
+  var oldest = null;
+  for (var i = 0; i < Pool.nodes.length; i++) {
+    var n = Pool.nodes[i];
+    if (!n.active || n.state === ST.SINKING) continue;
+    if (!oldest || n.ts < oldest.ts) oldest = n;
+  }
+  if (oldest) startSink(oldest, true);
+}
+
+
+function startSink(n, fast) {
+  if (!n.active || n.state === ST.SINKING) return;
+  n.state = ST.SINKING;
+  n.sinkStart = Clock.T;
+  n.sinkDur = fast
+    ? CONFIG.sinkMs[0] / 1000 * 0.75
+    : (CONFIG.sinkMs[0] + Math.random() * (CONFIG.sinkMs[1] - CONFIG.sinkMs[0])) / 1000;
+  n.opAtSink = n.lastOpacity;
+  n.el.classList.add('sinking');
+}
+
+
+function spawnNode(n, m, T) {
+  var seed = hashStr(m.id);
+  var rnd = mulberry32(seed);
+
+  var tier = Depth.pick(rnd);
+  var p = Depth.pOf(tier.z);
+
+  var el = n.el;
+  var fontSize = Math.round(lerp(tier.fs[0], tier.fs[1], rnd()));
+  var weight = WEIGHTS[Math.floor(rnd() * WEIGHTS.length)];
+  var color = pickWeighted(PALETTE, rnd).c;
+
+  /* ---------- typography ---------- */
+  var isTest = /^test$/i.test(String(m.text).trim());
+  el.className = 'msg ' + tier.cls + (isTest ? ' test-special' : '');
+  el.style.font = '';
+  el.style.fontFamily = Typography.resolve(m.font, seed);
+  el.style.fontSize = fontSize + 'px';
+  el.style.fontWeight = String(weight);
+  el.style.letterSpacing = (rnd() * 0.05 - 0.005).toFixed(3) + 'em';
+  el.style.color = color;
+  el.style.maxWidth = CONFIG.maxTextWidth + 'px';
+  el.style.willChange = 'transform, opacity';
+
+  /* ---------- entrance ---------- */
+  var isHero = (tier.cls === 't4');
+  var cands = isTest ? TEST_ENTRANCES : ENTRANCES.filter(function (e) {
+    if (e.heroOnly && (!isHero || !Quality.allowCascade)) return false;
+    return true;
+  });
+  var ent = pickWeighted(cands, rnd).name;
+
+  /* ---------- text ---------- */
+  while (n.txt.firstChild) n.txt.removeChild(n.txt.firstChild);
+  var clusters = null;
+  if (ent === 'cascade') {
+    clusters = splitGraphemes(m.text);
+    if (clusters.length > 34) { ent = 'bloom'; clusters = null; }
+  }
+  if (clusters) {
+    for (var ci = 0; ci < clusters.length; ci++) {
+      var sp = document.createElement('span');
+      sp.textContent = clusters[ci] === ' ' ? '\u00A0' : clusters[ci];
+      sp.style.animationDelay = (ci * 0.026).toFixed(3) + 's';
+      n.txt.appendChild(sp);
+    }
+  } else {
+    n.txt.appendChild(document.createTextNode(m.text));   /* ไม่ใช้ innerHTML เด็ดขาด */
+  }
+
+  el.classList.add('on');
+
+  /* ---------- measure (ครั้งเดียวต่อการ spawn — ไม่มี rect ใน rAF loop) ---------- */
+  var w = el.offsetWidth  || 260;
+  var h = el.offsetHeight || 60;
+  var ws = w * p, hs = h * p;
+
+  /* ---------- placement (screen space) ---------- */
+  var insetPx = Aquarium.w * tier.inset;
+  var minX = CONFIG.safeMargin + insetPx + ws / 2;
+  var maxX = Aquarium.w - CONFIG.safeMargin - insetPx - ws / 2;
+  var minY = CONFIG.safeMargin + hs / 2;
+  var maxY = Aquarium.h - CONFIG.bottomGap - hs / 2;
+  if (maxX < minX) { minX = maxX = Aquarium.w / 2; }
+  if (maxY < minY) { minY = maxY = Aquarium.h / 2; }
+
+  var bestX = 0, bestY = 0, bestScore = -Infinity;
+  var qrSize = clamp(Aquarium.w * 0.22, 200, 280);
+  var qrL = Aquarium.w - qrSize - CONFIG.qrMargin;
+  var qrT = Aquarium.h - qrSize - CONFIG.qrMargin;
+  var halfW = ws / 2, halfH = hs / 2;
+  for (var t = 0; t < CONFIG.placementTries; t++) {
+    var cx = lerp(minX, maxX, rnd());
+    var cy = lerp(minY, maxY, rnd());
+
+    /* กันข้อความชนกล่อง QR ที่มุมขวาล่าง เพื่อให้สแกนได้ตลอดเวลา */
+    var overlapsQR = (cx + halfW > qrL && cx - halfW < Aquarium.w - CONFIG.qrMargin &&
+                      cy + halfH > qrT && cy - halfH < Aquarium.h - CONFIG.qrMargin);
+    if (overlapsQR) continue;
+
+    var score = minDistanceToActive(cx, cy);
+    if (score > bestScore) { bestScore = score; bestX = cx; bestY = cy; }
+    if (bestScore > 300) break;
+  }
+
+  /* ถ้าจอแน่นมากจนลองแล้วไม่มีจุดว่าง ให้เลือกจุดที่ห่างจาก QR ที่สุด */
+  if (!isFinite(bestScore)) {
+    var fallbackScore = -Infinity;
+    for (var ft = 0; ft < CONFIG.placementTries; ft++) {
+      var fx = lerp(minX, maxX, rnd());
+      var fy = lerp(minY, maxY, rnd());
+      var fqrx = Math.max(qrL - fx, 0, fx - (Aquarium.w - CONFIG.qrMargin));
+      var fqry = Math.max(qrT - fy, 0, fy - (Aquarium.h - CONFIG.qrMargin));
+      var fd = Math.sqrt(fqrx * fqrx + fqry * fqry);
+      if (fd > fallbackScore) { fallbackScore = fd; bestX = fx; bestY = fy; }
+    }
+  }
+
+  n.scx = bestX; n.scy = bestY;
+  n.x0 = Depth.toLayerX(bestX, p, Aquarium.ox) - w / 2;
+  n.y0 = Depth.toLayerY(bestY, p, Aquarium.oy) - h / 2;
+
+  /* ---------- node state ---------- */
+  n.active = true;
+  n.isTest = isTest;
+  n.id = m.id;
+  n.ts = m.ts;
+  n.seq = m.seq;
+  n.tier = tier;
+  n.p = p;
+  n.baseOp = tier.op * lerp(0.92, 1.0, rnd());
+  n.phase = rnd() * 1000;
+  n.nx = rnd() * 400;
+  n.ny = rnd() * 400 + 137;
+  n.nr = rnd() * 400 + 271;
+  n.fx = 0.055 + rnd() * 0.03;
+  n.fy = 0.045 + rnd() * 0.03;
+  n.ampX = CONFIG.drift.x / p * lerp(0.8, 1.25, rnd());
+  n.ampY = CONFIG.drift.y / p * lerp(0.8, 1.25, rnd());
+  n.rise = CONFIG.drift.rise / p * lerp(0.7, 1.3, rnd());
+  n.breathe = CONFIG.breathe * lerp(0.7, 1.3, rnd());
+  n.swayY = lerp(3, 5, rnd());
+  n.lastOpacity = 0;
+
+  n.entrance = ent;
+  n.emergeDur = (CONFIG.emergeMs[0] +
+                 rnd() * (CONFIG.emergeMs[1] - CONFIG.emergeMs[0])) / 1000;
+  n.spawnT = T;
+  n.sideDir = rnd() < 0.5 ? -1 : 1;
+  n.state = ST.EMERGING;
+
+  if (ent === 'ripple') {
+    el.classList.remove('rippling');
+    void el.offsetWidth;                /* restart CSS animation ของโหนดที่รีไซเคิล */
+    el.classList.add('rippling');
+  }
+
+  /* ข้อความที่กู้คืนกลับมาและใกล้หมดอายุแล้ว — ไม่ต้องเข้าอย่างอลังการ */
+  var age = Store.now() - m.ts;
+  if (age > CONFIG.ttlMs - CONFIG.fadeMs) {
+    n.emergeDur = Math.min(n.emergeDur, 1.2);
+  }
+
+  updateNode(n, T, 0);
+}
+
+
+function minDistanceToActive(cx, cy) {
+  var best = 1e9;
+  for (var i = 0; i < Pool.nodes.length; i++) {
+    var n = Pool.nodes[i];
+    if (!n.active) continue;
+    var dx = n.scx - cx, dy = n.scy - cy;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    if (d < best) best = d;
+  }
+  return best === 1e9 ? 9999 : best;
+}
+
+
+function updateNode(n, T, dt) {
+  var el = n.el;
+  var tier = n.tier;
+  var age = Store.now() - n.ts;
+  var tLocal = T - n.spawnT;
+
+  /* ---- entrance ---- */
+  var eu = clamp(tLocal / n.emergeDur, 0, 1);
+  var e = easeOutQuint(eu);
+  var entOp = 1, entScale = 1, entZ = 0, entX = 0, entY = 0, entRotY = 0, entRotZ = 0;
+
+  switch (n.entrance) {
+    case 'rise':
+      entOp = e; entZ = -720 * (1 - e); entY = 130 * (1 - e);
+      entScale = lerp(0.9, 1, e); break;
+    case 'bloom':
+      entOp = easeOutCubic(eu); entScale = lerp(0.86, 1, e); break;
+    case 'side':
+      entOp = e; entX = n.sideDir * 340 * (1 - e); entScale = lerp(0.95, 1, e); break;
+    case 'ripple':
+      entOp = e; entScale = lerp(0.94, 1, e); break;
+    case 'cascade':
+      entOp = easeOutCubic(clamp(tLocal / 0.5, 0, 1)); break;
+    case 'pop': {
+      var pe = easeOutBack(eu);
+      entOp = easeOutCubic(eu);
+      entScale = lerp(0.50, 1, pe);
+      entY = 24 * (1 - e);
+      entRotZ = n.sideDir * 5 * (1 - e);
+      break;
+    }
+    case 'bounce': {
+      var bu = eu < .78 ? eu / .78 : (eu - .78) / .22;
+      var by = eu < .78 ? 1 - easeOutCubic(bu) : Math.sin((1 - bu) * Math.PI) * .12;
+      entOp = easeOutCubic(eu);
+      entY = 92 * Math.max(0, by);
+      entScale = 1 + Math.max(0, by) * .045;
+      break;
+    }
+    case 'floaty':
+      entOp = easeOutCubic(eu);
+      entX = Math.sin(eu * Math.PI * 1.5) * 34 * (1 - eu);
+      entY = 70 * (1 - e);
+      entRotZ = Math.sin(eu * Math.PI) * 7 * n.sideDir;
+      entScale = lerp(.90, 1, e);
+      break;
+    case 'swirl':
+      entOp = easeOutCubic(eu);
+      entZ = -360 * (1 - e);
+      entX = Math.sin((1 - e) * Math.PI * 1.6) * 72 * n.sideDir;
+      entY = Math.cos((1 - e) * Math.PI * 1.2) * 40 * (1 - e);
+      entRotY = 22 * (1 - e) * n.sideDir;
+      entRotZ = -10 * (1 - e) * n.sideDir;
+      entScale = lerp(.72, 1, e);
+      break;
+    case 'peek':
+      entOp = easeOutCubic(eu);
+      entX = n.sideDir * 470 * (1 - e);
+      entY = 16 * Math.sin(eu * Math.PI) * n.sideDir;
+      entRotY = -14 * (1 - e) * n.sideDir;
+      entScale = lerp(.94, 1, e);
+      break;
+    default:
+      entOp = e;
+  }
+
+  if (n.state === ST.EMERGING && eu >= 1) n.state = ST.DRIFTING;
+
+  /* ---- อายุ (ใช้ server clock → ทนต่อ sleep/wake และนาฬิกา Mac เพี้ยน) ---- */
+  var ageOp = 1;
+  var fadeStart = CONFIG.ttlMs - CONFIG.fadeMs;
+  if (age >= fadeStart) {
+    var fu = clamp((age - fadeStart) / CONFIG.fadeMs, 0, 1);
+    ageOp = lerp(1, 0.32, easeInCubic(fu));
+    if (n.state === ST.DRIFTING) n.state = ST.FADING;
+  }
+  if (n.state !== ST.SINKING && age >= CONFIG.ttlMs) startSink(n, false);
+
+  /* ---- drift ---- */
+  var tt = T + n.phase;
+  var dx = noise1(n.nx + tt * n.fx) * n.ampX + entX;
+  var dy = noise1(n.ny + tt * n.fy) * n.ampY - (tLocal * n.rise) + entY;
+  var rz = noise1(n.nr + tt * 0.028) * 2.4;
+  var ry = Math.sin(tt * 0.17) * n.swayY;
+  var breathe = 1 + Math.sin(tt * 0.21) * n.breathe;
+
+  /* ---- sinking ---- */
+  var sinkOp = 1, sinkZ = 0, sinkY = 0, sinkScale = 1;
+  if (n.state === ST.SINKING) {
+    var su = clamp((T - n.sinkStart) / n.sinkDur, 0, 1);
+    var s = easeInCubic(su);
+    sinkOp = 1 - su;
+    sinkZ = -820 * s;
+    sinkY = 150 * s;
+    sinkScale = lerp(1, 0.78, s);
+    if (su >= 1) { Pool.release(n); return; }
+  }
+
+  /* ---- compose (เขียนเฉพาะ transform + opacity) ---- */
+  var x = n.x0 + dx;
+  var y = n.y0 + dy + sinkY;
+  var z = tier.z + entZ + sinkZ;
+  var sc = entScale * breathe * sinkScale;
+  var op = n.baseOp * entOp * ageOp * sinkOp;
+
+  n.lastOpacity = op;
+  el.style.transform =
+    'translate3d(' + r1(x) + 'px,' + r1(y) + 'px,' + r1(z) + 'px) ' +
+    'rotateY(' + r1(ry + entRotY) + 'deg) rotateZ(' + r1(rz + entRotZ) + 'deg) ' +
+    'scale(' + (Math.round(sc * 1000) / 1000) + ')';
+  el.style.opacity = (Math.round(op * 1000) / 1000);
+}
+
+
+function sinkAllBefore(tsLimit) {
+  for (var i = 0; i < Pool.nodes.length; i++) {
+    var n = Pool.nodes[i];
+    if (n.active && n.state !== ST.SINKING && (!tsLimit || n.ts <= tsLimit)) {
+      startSink(n, false);
+    }
+  }
+}
+
+function findNode(id) {
+  for (var i = 0; i < Pool.nodes.length; i++) {
+    if (Pool.nodes[i].active && Pool.nodes[i].id === id) return Pool.nodes[i];
+  }
+  return null;
+}
+
+
+/* ==========================================================================
+   10 · NETWORK LOOP
+   ========================================================================== */
+
+var Net = {
+  state: 'online',
+  failStreak: 0,
+  nextAt: 0,
+  firstDone: false
+};
+
+function scheduleNext(ms) {
+  Net.nextAt = Clock.T * 1000 + ms;
+}
+
+function currentSince() {
+  if (!Net.firstDone) return 0;
+  if (Store.lastSuccessAt &&
+      (Date.now() - Store.lastSuccessAt) > CONFIG.recoveryResetMs) {
+    return 0;                       /* ขาดไปนานกว่า TTL → จอว่างแล้ว ขอชุดใหม่ทั้งหมด */
+  }
+  return Store.cursor;
+}
+
+function doPoll() {
+  var params = { action: 'messages', since: currentSince() };
+  if (FRESH_MODE && !Net.firstDone) params.fresh = 1;
+
+  Transport.get(params, function (data, sentAt, rtt) {
+    if (!data || data.ok !== true) { onPollFail('bad_payload'); return; }
+    onPollOk(data, rtt);
+  }, function (reason) {
+    if (reason === 'inflight') { scheduleNext(300); return; }
+    onPollFail(reason);
+  });
+}
+
+function onPollOk(data, rtt) {
+  Net.failStreak = 0;
+  Store.lastSuccessAt = Date.now();
+  setConn('online');
+
+  if (data.serverTime) Store.syncClock(data.serverTime, 0, rtt);
+
+  /* ---- runtime config จาก Settings sheet ---- */
+  if (data.config) {
+    if (data.config.poll)        CONFIG.pollMs = clamp(data.config.poll | 0, 800, 30000);
+    if (data.config.maxOnScreen) Quality.serverMax =
+      clamp(data.config.maxOnScreen | 0, 5, CONFIG.poolSize - 8);
+  }
+  if (data.ttl) CONFIG.ttlMs = clamp((data.ttl | 0) * 1000, 30000, 3600000);
+  Quality.apply();
+
+  if (typeof data.cursor === 'number' && data.cursor > Store.cursor) {
+    Store.cursor = data.cursor;
+  }
+
+  /* ---- CLEAR ALL : เป็น event timestamp ไม่ใช่ boolean ที่ค้างตลอด ---- */
+  var caAt = Number(data.clearAllAt || 0) || 0;
+  if (!Store.gotFirstResponse) {
+    Store.lastHandledClearAllAt = caAt;      /* ครั้งแรก = รับทราบ ไม่ลงมือ */
+  } else if (caAt > Store.lastHandledClearAllAt) {
+    Store.lastHandledClearAllAt = caAt;
+    Spawner.dropBefore(caAt);
+    sinkAllBefore(caAt);                     /* ข้อความที่มาทีหลังปลอดภัย */
+  }
+
+  /* ---- HIDDEN : ถอนข้อความที่เจ้าหน้าที่ซ่อน ---- */
+  if (data.hidden && data.hidden.length) {
+    for (var h = 0; h < data.hidden.length; h++) {
+      var hid = data.hidden[h];
+      if (Store.revoked[hid]) continue;
+      Store.revoke(hid);
+      Spawner.dropId(hid);
+      var hn = findNode(hid);
+      if (hn) startSink(hn, true);
+    }
+  }
+
+  /* ---- MESSAGES ---- */
+  if (data.messages && data.messages.length) {
+    var now = Store.now();
+    for (var i = 0; i < data.messages.length; i++) {
+      var m = data.messages[i];
+      if (!m || !m.id || !m.text) continue;
+      if (Store.revoked[m.id]) continue;
+      if (m.ts && m.ts <= Store.lastHandledClearAllAt) continue;
+      if (!Store.markSeen(m.id)) continue;
+      var ts = Number(m.ts) || Date.parse(m.createdAt) || now;
+      if ((now - ts) >= CONFIG.ttlMs) continue;
+      if (m.seq && m.seq > Store.cursor) Store.cursor = m.seq;
+      Spawner.enqueue({
+        id: m.id,
+        text: String(m.text),
+        ts: ts,
+        seq: Number(m.seq) || 0,
+        font: m.font ? String(m.font) : ''
+      });
+    }
+  }
+
+  Store.gotFirstResponse = true;
+  Net.firstDone = true;
+  scheduleNext(CONFIG.pollMs + (Math.random() * 2 - 1) * CONFIG.jitterMs);
+}
+
+function onPollFail(reason) {
+  Net.failStreak++;
+  if (Net.failStreak >= 3) {
+    setConn('offline');
+    var idx = Math.min(Net.failStreak - 3, CONFIG.backoffMs.length - 1);
+    var base = CONFIG.backoffMs[idx];
+    scheduleNext(base * (0.8 + Math.random() * 0.4));
+  } else {
+    setConn('degraded');
+    scheduleNext(CONFIG.degradedPollMs);
+  }
+  if (window.console) console.log('[aq] poll fail:', reason, 'streak', Net.failStreak);
+}
+
+function setConn(s) {
+  if (Net.state === s) return;
+  Net.state = s;
+  var d = document.getElementById('dot');
+  d.className = (s === 'online') ? '' : s;
+}
+
+function pollNow() { Net.nextAt = 0; }
+
+
+/* ==========================================================================
+   11 · BACKGROUND VIDEO
+   ========================================================================== */
+
+var Video = (function () {
+  var a, b, cur, nxt, fading = false, dead = false, unlocked = true;
+  var lastTime = -1, lastTimeAt = 0;
+
+  function init() {
+    a = document.getElementById('bgA');
+    b = document.getElementById('bgB');
+    [a, b].forEach(function (v) {
+      v.muted = true;                     /* ตั้งเป็น property ด้วย — Safari เช็คตัวนี้ */
+      v.defaultMuted = true;
+      v.volume = 0;
+      v.playsInline = true;
+      v.loop = !CONFIG.bg.crossfade;
+      v.style.filter = CONFIG.bg.filter;
+      v.addEventListener('error', onErr);
+      v.addEventListener('stalled', kick);
+      v.addEventListener('suspend', kick);
+    });
+    cur = a; nxt = b;
+    b.pause();
+
+    tryPlay(a);
+    if (CONFIG.bg.crossfade) { try { b.currentTime = 0; } catch (e) {} }
+
+    document.addEventListener('visibilitychange', kick);
+    window.addEventListener('pageshow', kick);
+    window.addEventListener('focus', kick);
+    setInterval(watchdog, CONFIG.bg.watchdogMs);
+
+    var tap = document.getElementById('tapstart');
+    tap.addEventListener('click', unlock, { passive:false });
+    tap.addEventListener('touchend', unlock, { passive:false });
+  }
+
+  function onErr() {
+    if (dead) return;
+    dead = true;
+    document.body.classList.add('no-video');
+    if (window.console) console.log('[aq] background video failed — using CSS fallback');
+  }
+
+  function tryPlay(v) {
+    if (!v) return;
+    try {
+      v.muted = true;
+      v.defaultMuted = true;
+      v.playsInline = true;
+      var pr = v.play();
+      if (pr && typeof pr.then === 'function') {
+        pr.then(function () {
+          hideTap();
+        }).catch(function (err) {
+          if (window.console) console.log('[aq] video play blocked:', err);
+          showTap();
+        });
+      } else {
+        hideTap();
+      }
+    } catch (err) {
+      if (window.console) console.log('[aq] video play error:', err);
+      showTap();
+    }
+  }
+
+  function showTap() {
+    unlocked = false;
+    document.getElementById('tapstart').classList.add('show');
+  }
+  function hideTap() {
+    unlocked = true;
+    document.getElementById('tapstart').classList.remove('show');
+  }
+
+  function unlock(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+
+    [a, b].forEach(function (v) {
+      if (!v) return;
+      v.muted = true;
+      v.defaultMuted = true;
+      v.playsInline = true;
+    });
+
+    tryPlay(cur);
+
+    if (CONFIG.bg.crossfade && nxt) {
+      try {
+        nxt.currentTime = 0;
+        var p = nxt.play();
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+        nxt.style.opacity = '0';
+      } catch (e) {}
+    }
+  }
+
+  function kick() {
+    if (dead) return;
+    if (cur && cur.paused) tryPlay(cur);
+  }
+
+  function watchdog() {
+    if (dead || !cur) return;
+    var t = cur.currentTime;
+    var now = Date.now();
+    if (cur.paused) { tryPlay(cur); return; }
+    if (t === lastTime) {
+      if (now - lastTimeAt > 4000) {          /* เฟรมไม่เดินเลย */
+        try { cur.currentTime = Math.max(0, t - 0.05); } catch (e) {}
+        tryPlay(cur);
+        lastTimeAt = now;
+      }
+    } else {
+      lastTime = t; lastTimeAt = now;
+    }
+    if (cur.readyState < 2) tryPlay(cur);
+  }
+
+  /** เรียกจาก rAF loop — จัดการรอยต่อ loop ด้วย crossfade 2 ชั้น */
+  function tick() {
+    if (dead || !CONFIG.bg.crossfade) return;
+    if (!cur || !isFinite(cur.duration) || cur.duration <= 0) return;
+
+    var lead = CONFIG.bg.leadS;
+    var remain = cur.duration - cur.currentTime;
+
+    if (!fading && remain <= lead) {
+      fading = true;
+      try { nxt.currentTime = 0; } catch (e) {}
+      nxt.play().catch(function () {});
+    }
+
+    if (fading) {
+      var u = clamp((lead - remain) / lead, 0, 1);
+      if (remain <= 0 || cur.ended || u >= 1) {
+        cur.style.opacity = '0';
+        nxt.style.opacity = '1';
+        try { cur.pause(); cur.currentTime = 0; } catch (e) {}
+        var tmp = cur; cur = nxt; nxt = tmp;
+        fading = false;
+      } else {
+        cur.style.opacity = String(1 - u);
+        nxt.style.opacity = String(u);
+      }
+    }
+  }
+
+  function onWake() { kick(); if (cur && cur.paused) tryPlay(cur); }
+
+  return { init: init, tick: tick, onWake: onWake, isDead: function () { return dead; },
+           time: function () { return cur ? cur.currentTime : 0; } };
+})();
+
+
+/* ==========================================================================
+   12 · ADAPTIVE QUALITY
+   ========================================================================== */
+
+var Quality = {
+  level: 0,
+  serverMax: 60,
+  allowCascade: true,
+  frames: 0,
+  acc: 0,
+  fps: 60,
+  goodWindows: 0,
+
+  sample: function (dtMs) {
+    this.frames++;
+    this.acc += dtMs;
+    if (this.acc < CONFIG.quality.windowMs) return;
+
+    this.fps = this.frames / (this.acc / 1000);
+    this.frames = 0; this.acc = 0;
+
+    if (this.fps < CONFIG.quality.down && this.level < 5) {
+      this.level++; this.goodWindows = 0; this.apply();
+    } else if (this.fps > CONFIG.quality.up && this.level > 0) {
+      this.goodWindows++;
+      if (this.goodWindows >= 2) { this.level--; this.goodWindows = 0; this.apply(); }
+    } else {
+      this.goodWindows = 0;
+    }
+  },
+
+  apply: function () {
+    var l = this.level;
+    CONFIG.maxOnScreen = Math.min(
+      this.serverMax, l >= 1 ? 48 : this.serverMax, CONFIG.poolSize - 8);
+    document.body.classList.toggle('q-noshafts', l >= 2);
+    document.body.classList.toggle('q-lowgrain', l >= 3);
+    this.allowCascade = (l < 4);
+    Depth.collapsed = (l >= 5);
+  }
+};
+
+
+/* ==========================================================================
+   13 · SCHEDULER — rAF loop เดียวของทั้งแอป
+   ========================================================================== */
+
+var Clock = { T: 0, last: 0, running: false };
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+
+  var now = ts || performance.now();
+  var realDt = now - Clock.last;
+  Clock.last = now;
+
+  if (realDt > 5000) {                       /* เพิ่งตื่นจาก sleep */
+    onWake();
+    realDt = 16.7;
+  }
+  var dt = clamp(realDt, 0, 50) / 1000;      /* clamp กันข้อความกระเด็นออกนอกจอ */
+  Clock.T += dt;
+  var T = Clock.T;
+
+  /* --- network --- */
+  if (T * 1000 >= Net.nextAt) doPoll();
+
+  /* --- spawner --- */
+  Spawner.tick(T);
+
+  /* --- camera + nodes --- */
+  updateCamera(T);
+  Aquarium.el.style.transform =
+    'translate3d(' + r1(Camera.x) + 'px,' + r1(Camera.y) + 'px,0) ' +
+    'rotateY(' + r1(Camera.rotY) + 'deg)';
+
+  var nodes = Pool.nodes;
+  for (var i = 0; i < nodes.length; i++) {
+    if (nodes[i].active) updateNode(nodes[i], T, dt);
+  }
+
+  /* --- background --- */
+  Video.tick();
+
+  /* --- quality + diagnostics --- */
+  Quality.sample(realDt);
+  Diag.tick(realDt);
+}
+
+function onWake() {
+  Video.onWake();
+  pollNow();
+  /* จบ entrance ที่ค้างอยู่ทั้งหมด แล้วให้อายุจาก server clock ตัดสินชะตาต่อ */
+  for (var i = 0; i < Pool.nodes.length; i++) {
+    var n = Pool.nodes[i];
+    if (n.active) n.spawnT = Clock.T - n.emergeDur;
+  }
+}
+
+
+/* ==========================================================================
+   14 · DIAGNOSTICS
+   ========================================================================== */
+
+var Diag = {
+  el: null, acc: 0, visible: false,
+
+  init: function () {
+    this.el = document.getElementById('diag');
+    if (Q.diag === '1') this.toggle();
+  },
+
+  toggle: function () {
+    this.visible = !this.visible;
+    this.el.classList.toggle('show', this.visible);
+  },
+
+  tick: function (dtMs) {
+    if (!this.visible) return;
+    this.acc += dtMs;
+    if (this.acc < 500) return;
+    this.acc = 0;
+    this.el.textContent =
+      'MESSAGE AQUARIUM · display\n' +
+      'fps        ' + Quality.fps.toFixed(1) + '\n' +
+      'quality    L' + Quality.level + '\n' +
+      'on screen  ' + Pool.activeCount() + ' / ' + CONFIG.maxOnScreen + '\n' +
+      'queue      ' + Spawner.queue.length + '\n' +
+      'conn       ' + Net.state + '  (fail ' + Net.failStreak + ')\n' +
+      'cursor     ' + Store.cursor + '\n' +
+      'clock off  ' + Math.round(Store.clockOffset) + ' ms\n' +
+      'ttl        ' + Math.round(CONFIG.ttlMs / 1000) + ' s\n' +
+      'clearedAt  ' + (Store.lastHandledClearAllAt || 0) + '\n' +
+      'fonts      ' + (Typography.activeList().join(', ') || '(fallback only)') + '\n' +
+      'video      ' + (Video.isDead() ? 'FALLBACK' : Video.time().toFixed(1) + 's') + '\n' +
+      'mode       ' + (FRESH_MODE ? 'fresh' : 'recovery');
+  }
+};
+
+
+/* ==========================================================================
+   15 · GRAIN (สร้างครั้งเดียวด้วย canvas — ไม่ต้องมีไฟล์ภาพ)
+   ========================================================================== */
+
+function buildGrain() {
+  var s = 128;
+  var c = document.createElement('canvas');
+  c.width = s; c.height = s;
+  var ctx = c.getContext('2d');
+  var img = ctx.createImageData(s, s);
+  var d = img.data;
+  for (var i = 0; i < d.length; i += 4) {
+    var v = 120 + Math.random() * 135;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  document.getElementById('grain').style.backgroundImage = 'url(' + c.toDataURL('image/png') + ')';
+}
+
+
+/* ==========================================================================
+   16 · BOOT
+   ========================================================================== */
+
+function boot() {
+  Aquarium.el = document.getElementById('aquarium');
+  /* QR เป็น overlay มุมขวาล่าง จึงไม่ต้องกินพื้นที่ทั้งแถบด้านล่าง */
+  Aquarium.el.style.bottom = '0px';
+  document.getElementById('qrbar').style.height = '';
+  document.getElementById('qrglow').style.bottom = '0px';
+
+  measureStage();
+  buildGrain();
+  Typography.detect();
+  Pool.init(Aquarium.el);
+  Quality.serverMax = CONFIG.maxOnScreen;
+  Quality.apply();
+  Diag.init();
+  Video.init();
+
+  document.getElementById('qrimg').addEventListener('error', function () {
+    document.getElementById('qrwrap').classList.add('noqr');
+  });
+
+  window.addEventListener('resize', function () {
+    measureStage();
+  });
+
+  window.addEventListener('online', pollNow);
+
+  document.addEventListener('keydown', function (ev) {
+    var k = (ev.key || '').toLowerCase();
+    if (k === 'd') { Diag.toggle(); }
+    else if (k === 'r') { location.reload(); }
+    else if (k === 'c') { sinkAllBefore(0); Spawner.queue.length = 0; }
+    else if (k === 'f') {
+      var el = document.documentElement;
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else {
+        (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+      }
+    }
+  });
+
+  if (CONFIG.API_URL.indexOf('AKfycbzM3DJIFcacOTgMUVSxEXwqNjruGYxtqAlEgg8ZGEXZMBgk_OcL6o9LPaiEp2mEfaPQ') >= 0) {
+    if (window.console) {
+      console.log('%c[MESSAGE AQUARIUM] ยังไม่ได้ตั้งค่า API_URL — ' +
+                  'แก้ในบล็อก 01 CONFIG หรือเปิดด้วย ?api=<exec url>',
+                  'color:#e0a06a');
+    }
+    Diag.visible = false; Diag.toggle();
+  }
+
+  Clock.last = performance.now();
+  Net.nextAt = 0;
+  requestAnimationFrame(frame);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
+
+})();
+</script>
+
+</body>
+</html>
